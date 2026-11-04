@@ -12,9 +12,13 @@
 ################################################################################
 # Build Arguments
 ################################################################################
-ARG BASE_IMAGE=quay.io/opendatahub/odh-workbench-jupyter-minimal-rocm-py312-ubi9:3.6-v1.50
+# POC (workbench required): base on odh-base instead of jupyter-minimal, then
+# layer a lean JupyterLab stack in-repo (no Elyra / Kale).
+ARG BASE_IMAGE=quay.io/opendatahub/odh-base-image-rocm-py312-c9s:v7.14@sha256:5547ccd3dff412764b4f0a3cefb5ec30ab13e7fd9ef16c39dd25461b02a48ee8
 ARG PYTHON_VERSION=3.12
 ARG DOWNSTREAM=false
+# Lean workbench packages (not locked in requirements.txt yet — see POC doc).
+ARG LEAN_WORKBENCH_PACKAGES="jupyterlab jupyter-server ipykernel"
 
 ################################################################################
 # Build Stage - Install Python Dependencies
@@ -37,6 +41,14 @@ RUN uv pip install --no-cache-dir \
     --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/rocm7.14-ubi9/simple/ \
     -r /tmp/deps/requirements.txt
 
+# POC: lean JupyterLab (no Elyra/Kale). Follow-up: pin in pyproject.toml + lock.
+ARG LEAN_WORKBENCH_PACKAGES
+RUN uv pip install --no-cache-dir \
+    --index-strategy=unsafe-best-match \
+    --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/rocm7.14-ubi9/simple/ \
+    ${LEAN_WORKBENCH_PACKAGES} \
+ && python -m ipykernel install --prefix=/opt/app-root --name=python3 --display-name="Python 3"
+
 # Fix permissions for OpenShift
 ARG PYTHON_VERSION
 USER 0
@@ -52,10 +64,10 @@ RUN rm -rf /tmp/deps
 FROM ${BASE_IMAGE} AS final
 
 LABEL name="th-torch-rocm-py312" \
-      summary="ROCm 7.14 Python 3.12 Training Hub 11 PyTorch 2.12.0 image on UBI9" \
-      description="Universal ROCm image combining Jupyter workbench and runtime ML stack on UBI9" \
+      summary="ROCm 7.14 Python 3.12 Training Hub + lean JupyterLab on EL9" \
+      description="Universal ROCm training image: lean JupyterLab workbench (no Elyra/Kale) + runtime ML stack on odh-base" \
       io.k8s.display-name="ROCm Python 3.12 Universal Training Image" \
-      io.k8s.description="Universal ROCm training image: Jupyter workbench by default; runtime when command provided."
+      io.k8s.description="Universal ROCm training image: lean Jupyter workbench by default; runtime when command provided."
 
 USER 0
 WORKDIR /opt/app-root/src
@@ -113,6 +125,7 @@ fi
 ARG PYTHON_VERSION
 COPY --from=builder /opt/app-root/lib/python${PYTHON_VERSION}/site-packages /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=builder /opt/app-root/bin /opt/app-root/bin
+COPY --from=builder /opt/app-root/share/jupyter /opt/app-root/share/jupyter
 
 # Remove uv from final image (not needed at runtime)
 RUN rm -f /opt/app-root/bin/uv
@@ -120,8 +133,9 @@ RUN rm -f /opt/app-root/bin/uv
 # Copy license file
 COPY LICENSE.md /licenses/rocm-license.md
 
-# Copy entrypoint
+# Copy dual-mode entrypoint + lean workbench starter (no Elyra/Kale)
 COPY --chmod=0755 entrypoint-universal.sh /usr/local/bin/entrypoint-universal.sh
+COPY --chmod=0755 start-notebook.sh /usr/local/bin/start-notebook.sh
 
 # Fix permissions for OpenShift (final stage)
 RUN fix-permissions /opt/app-root -P \

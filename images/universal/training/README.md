@@ -1,6 +1,6 @@
 # Universal Training Images
 
-Universal images that serve dual purposes: **Jupyter Workbench** (default) and **Training Runtime** (when command provided). These images are designed for FIPS compliance (best effort) and hermetic builds in downstream Konflux pipelines.
+Universal images that serve dual purposes: **lean Jupyter Workbench** (default) and **Training Runtime** (when command provided). **POC (workbench required):** built on `odh-base` (not `jupyter-minimal`) with an in-repo lean JupyterLab stack — **no Elyra / Kale**. Designed for FIPS compliance (best effort) and hermetic builds in downstream Konflux pipelines.
 
 These images are structured to support **hermetic builds** in downstream Konflux/Tekton pipelines:
 
@@ -41,7 +41,7 @@ All flavors include:
 - **Training Hub** with LoRA support
 - **PyTorch**
 - **Python 3.12**
-- **JupyterLab** (workbench mode)
+- **Lean JupyterLab** (workbench mode; no Elyra / Kale)
 
 ### CUDA Image
 - CUDA
@@ -81,8 +81,10 @@ podman run <image> torchrun --nproc_per_node=2 train.py
 ```
 
 The `entrypoint-universal.sh` script handles mode detection:
-- No command → starts JupyterLab
+- `NOTEBOOK_ARGS` set / no command → lean `start-notebook.sh` (JupyterLab only)
 - Command provided → executes the command
+
+`start-notebook.sh` lives in this repo and does **not** source Elyra/Kale setup.
 
 ---
 
@@ -253,6 +255,7 @@ ENV ROCM_HOME=/opt/rocm \
 ├── pyproject.toml          # Python dependencies (what we add on top of base)
 ├── requirements.txt        # Locked dependencies with hashes (from AIPCC)
 ├── entrypoint-universal.sh # Dual-mode entrypoint (workbench/runtime)
+├── start-notebook.sh       # Lean JupyterLab starter (no Elyra/Kale)
 ├── LICENSE.md              # License file
 ├── cuda.repo               # CUDA DNF repo (used only when DOWNSTREAM!=true, CUDA images)
 ├── rocm.repo               # ROCm DNF repo (used only when DOWNSTREAM!=true, ROCm images)
