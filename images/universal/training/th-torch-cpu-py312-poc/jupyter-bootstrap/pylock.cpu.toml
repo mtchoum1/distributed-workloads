@@ -1,0 +1,7 @@
+# PoC placeholder; deliberately not consumed by Dockerfile.poc.
+#
+# At the one-time 3.7 GA handoff, replace this file with the full pylock CPU
+# export made from the maintenance tag. Configure Konflux/Cachi2 to prefetch
+# every wheel in that lock, then use uv --no-index --find-links in production.
+lock-version = "1.0"
+requires-python = "==3.12.*"

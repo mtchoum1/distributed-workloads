@@ -1,0 +1,148 @@
+# CPU training-universal bootstrap PoC.
+#
+# This file intentionally has no notebooks image or source dependency.  The
+# vendored jupyter-bootstrap directory is the only Jupyter minimal contract.
+
+ARG BASE_IMAGE=quay.io/aipcc/base-images/cpu-torch2.13-el9.8:1793764639@sha256:645d607c2c854116b4f8984cfe6c95135c55231b309a6b6c87c5b5c4c4d0e5cc
+ARG PYTHON_VERSION=3.12
+ARG JUPYTER_INDEX_URL=https://packages.redhat.com/api/pypi/public-rhai/cpu-torch2.13-el9.8/simple/
+
+################################################################################
+# Vendored Jupyter minimal contract
+################################################################################
+FROM ${BASE_IMAGE} AS jupyter-bootstrap
+
+ARG JUPYTER_INDEX_URL
+ARG INSTALL_PDF_DEPS=false
+
+USER 0
+WORKDIR /opt/app-root/bin
+
+COPY --chown=1001:0 jupyter-bootstrap/start-notebook.sh ./
+COPY --chown=1001:0 jupyter-bootstrap/requirements.cpu.txt ./requirements.txt
+COPY --chown=1001:0 jupyter-bootstrap/utils ./utils
+
+# PDF export is deliberately opt-in in this local-build PoC: its TeX RPMs must
+# be prefetched before this becomes a hermetic Konflux build.
+RUN if [ "${INSTALL_PDF_DEPS}" = "true" ]; then ./utils/install_pdf_deps.sh; fi
+
+USER 1001:0
+RUN /bin/bash <<'EOF'
+set -Eeuxo pipefail
+umask 0002
+
+# The vendored requirements are a deliberately small, real Jupyter contract.
+# Production replaces them with the full 3.7-GA locked export.
+UV_NO_CACHE=true UV_LINK_MODE=copy uv pip install \
+    --index-url="${JUPYTER_INDEX_URL}" \
+    --requirements=./requirements.txt
+
+if [ -f /opt/app-root/share/jupyter/kernels/python3/kernel.json ]; then
+    sed -i -e "s/Python.*/$(python --version | cut -d '.' -f-2)\",/" \
+        /opt/app-root/share/jupyter/kernels/python3/kernel.json
+fi
+install -D -m 0664 ./utils/jupyter_server_config.py \
+    /opt/app-root/etc/jupyter/jupyter_server_config.py
+jupyter labextension disable "@jupyterlab/apputils-extension:announcements"
+chmod g+w /opt/app-root/etc/jupyter/labconfig
+EOF
+
+USER 1001
+WORKDIR /opt/app-root/src
+
+################################################################################
+# Training dependency build
+################################################################################
+FROM jupyter-bootstrap AS builder
+
+USER 0
+WORKDIR /tmp/deps
+COPY --chown=1001:0 pyproject.toml requirements.txt ./
+
+USER 1001
+WORKDIR /opt/app-root/src
+RUN pip install --no-cache-dir --no-deps \
+    --index-url=https://packages.redhat.com/api/pypi/public-rhai/cpu-torch2.13-el9.8/simple/ \
+    -r /tmp/deps/requirements.txt
+
+ARG PYTHON_VERSION
+USER 0
+RUN chmod -R g+w /opt/app-root/lib/python${PYTHON_VERSION}/site-packages \
+ && fix-permissions /opt/app-root -P \
+ && rm -rf /tmp/deps
+
+################################################################################
+# FIPS-friendly runtime
+################################################################################
+FROM jupyter-bootstrap AS final
+
+LABEL name="th-torch-cpu-py312-poc" \
+      summary="PoC: self-contained CPU Python 3.12 Training Hub image on EL9" \
+      description="Self-contained Jupyter workbench and Training Hub runtime; no notebooks image dependency."
+
+ARG PYTHON_VERSION
+
+USER 0
+WORKDIR /opt/app-root/src
+
+COPY --from=builder /opt/app-root/lib/python${PYTHON_VERSION}/site-packages /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
+COPY --from=builder /opt/app-root/bin /opt/app-root/bin
+
+# AIPCC local bases often ship with empty yum.repos.d (hermetic). For a local
+# PoC build, enable public UBI9 repos when nothing is configured so openssh-server
+# can install. Hermetic/Konflux builds should prefetch RPMs via Cachi2 instead.
+# OpenMPI is expected in the AIPCC base; fail early if missing.
+RUN set -eux; \
+    if [ -z "$(find /etc/yum.repos.d -type f -name '*.repo' 2>/dev/null)" ]; then \
+      printf '%s\n' \
+        '[ubi-9-baseos]' \
+        'name=ubi-9-baseos' \
+        'baseurl=https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os' \
+        'enabled=1' \
+        'gpgcheck=0' \
+        '' \
+        '[ubi-9-appstream]' \
+        'name=ubi-9-appstream' \
+        'baseurl=https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os' \
+        'enabled=1' \
+        'gpgcheck=0' \
+        > /etc/yum.repos.d/ubi-poc.repo; \
+    fi; \
+    dnf install -y --setopt=install_weak_deps=False openssh-server; \
+    dnf clean all; \
+    rm -f /etc/yum.repos.d/ubi-poc.repo; \
+    mkdir -p /var/run/sshd /home/mpiuser/.openmpi; \
+    test -x /usr/lib64/openmpi/bin/mpirun \
+      || { echo "ERROR: base image has no OpenMPI at /usr/lib64/openmpi"; exit 1; }
+
+COPY mpiuser-sshd.conf /home/mpiuser/.sshd_config
+COPY --chmod=0755 openshift-uid-exec.sh /usr/local/bin/openshift-uid-exec.sh
+COPY --chmod=0755 entrypoint-universal.sh /usr/local/bin/entrypoint-universal.sh
+COPY LICENSE.md /licenses/cpu-license.md
+
+RUN ln -sfn openshift-uid-exec.sh /usr/local/bin/mpirun \
+ && ln -sfn openshift-uid-exec.sh /usr/local/bin/mpiexec \
+ && ln -sfn openshift-uid-exec.sh /usr/local/bin/uid_entrypoint.sh \
+ && ln -sfn /usr/lib64/openmpi/bin/orted /usr/bin/orted \
+ && ln -sfn /usr/lib64/openmpi/bin/mpiexec /usr/bin/mpiexec \
+ && if [ ! -e /usr/local/bin/python ]; then \
+      printf '#!/bin/sh\nexec /opt/app-root/bin/python "$@"\n' > /usr/local/bin/python \
+      && chmod 0755 /usr/local/bin/python; \
+    fi \
+ && grep -qxF 'LD_LIBRARY_PATH=/usr/lib64/openmpi/lib' /etc/environment \
+    || echo 'LD_LIBRARY_PATH=/usr/lib64/openmpi/lib' >> /etc/environment \
+ && chgrp -R 0 /home/mpiuser && chmod -R g=u /home/mpiuser \
+ && chmod g=u /etc/passwd \
+ && fix-permissions /opt/app-root -P \
+ && chmod -R g+w /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
+
+ENV MPI_HOME=/usr/lib64/openmpi \
+    PATH=/usr/local/bin:/usr/lib64/openmpi/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/lib64/openmpi/lib:${LD_LIBRARY_PATH} \
+    BOOTSTRAP_LINEAGE=notebooks@3.7-GA-TAG-TODO
+
+USER 1001
+WORKDIR /opt/app-root/src
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-universal.sh"]
+CMD ["start-notebook.sh"]

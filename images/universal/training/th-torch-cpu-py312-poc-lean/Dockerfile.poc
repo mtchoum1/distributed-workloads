@@ -1,0 +1,154 @@
+# TH CPU Universal Image Dockerfile (torch 2.13.0)
+#
+# FIPS-friendly Features:
+# - Build tools are isolated in intermediate stage
+# - Final image contains only runtime dependencies
+# - Uses pip install (additive) to preserve base image packages
+#
+# Build Modes:
+# - Midstream (default): DOWNSTREAM=false - installs system packages
+# - Downstream: DOWNSTREAM=true - skips midstream-only sections (base image has them)
+
+################################################################################
+# Build Arguments
+################################################################################
+# Additive lean PoC: base on odh-base instead of jupyter-minimal, then
+# layer a lean JupyterLab stack in-repo (no Elyra / Kale). See README-PoC.md.
+ARG BASE_IMAGE=quay.io/opendatahub/odh-base-image-cpu-py312-c9s:latest@sha256:838744ad87615f76bd5aae375d973e58a11fd86342328c755f47ce0bd1e4697f
+ARG PYTHON_VERSION=3.12
+ARG DOWNSTREAM=false
+# Lean workbench packages (not locked in requirements.txt yet — see POC-README.md).
+ARG LEAN_WORKBENCH_PACKAGES="jupyterlab jupyter-server ipykernel"
+
+################################################################################
+# Build Stage - Install Python Dependencies
+################################################################################
+FROM ${BASE_IMAGE} AS builder
+
+USER 0
+WORKDIR /tmp/deps
+
+# Copy requirements files
+COPY --chown=1001:0 pyproject.toml requirements.txt ./
+
+# Switch to user 1001 for pip installations
+USER 1001
+WORKDIR /opt/app-root/src
+
+# Install dependencies from AIPCC prod index
+RUN pip install --no-cache-dir --no-deps \
+    --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/cpu-ubi9/simple/\
+    -r /tmp/deps/requirements.txt
+
+# POC: lean JupyterLab (no Elyra/Kale). Follow-up: pin in pyproject.toml + lock.
+ARG LEAN_WORKBENCH_PACKAGES
+RUN pip install --no-cache-dir \
+    --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/cpu-ubi9/simple/ \
+    ${LEAN_WORKBENCH_PACKAGES} \
+ && python -m ipykernel install --prefix=/opt/app-root --name=python3 --display-name="Python 3"
+
+# Fix permissions for OpenShift
+ARG PYTHON_VERSION
+USER 0
+RUN chmod -R g+w /opt/app-root/lib/python${PYTHON_VERSION}/site-packages \
+ && fix-permissions /opt/app-root -P
+
+# Clean up
+RUN rm -rf /tmp/deps
+
+################################################################################
+# Final Stage - FIPS-friendly Runtime
+################################################################################
+FROM ${BASE_IMAGE} AS final
+
+LABEL name="th-torch-cpu-py312-poc-lean" \
+      summary="PoC (lean): CPU Python 3.12 Training Hub + lean JupyterLab on EL9" \
+      description="Universal CPU training image: lean JupyterLab workbench (no Elyra/Kale) + runtime ML stack on odh-base" \
+      io.k8s.display-name="CPU Python 3.12 Universal Training Image" \
+      io.k8s.description="Universal CPU training image: lean Jupyter workbench by default; runtime when command provided."
+
+USER 0
+WORKDIR /opt/app-root/src
+
+################################################################################
+# MIDSTREAM ONLY: System packages
+# Controlled by ARG DOWNSTREAM (default: false)
+# - DOWNSTREAM=false (midstream): Installs system packages
+# - DOWNSTREAM=true: Skips this section (AIPCC base image has everything pre-configured)
+################################################################################
+ARG DOWNSTREAM
+
+RUN if [ "${DOWNSTREAM}" != "true" ]; then \
+    echo "MIDSTREAM BUILD: Installing system packages..." && \
+    dnf install -y --setopt=install_weak_deps=False \
+        perl \
+        mesa-libGL \
+        protobuf \
+        skopeo && \
+    dnf clean all && rm -rf /var/cache/dnf/*; \
+else \
+    echo "DOWNSTREAM BUILD: Skipping system packages (provided by base image)"; \
+fi
+################################################################################
+# END MIDSTREAM ONLY
+################################################################################
+
+# Copy Python site-packages, CLI entry points, and Jupyter kernelspec from builder
+# This excludes any build artifacts (FIPS friendly)
+ARG PYTHON_VERSION
+COPY --from=builder /opt/app-root/lib/python${PYTHON_VERSION}/site-packages /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
+COPY --from=builder /opt/app-root/bin /opt/app-root/bin
+COPY --from=builder /opt/app-root/share/jupyter /opt/app-root/share/jupyter
+
+# polyfile-weave registers cv2.typing stubs that trigger import cv2 during
+# pkgutil scanning in multiprocessing.spawn, which fails on UBI9
+RUN pip uninstall --yes polyfile-weave
+
+# The SDK replaces the container entrypoint and execs an MPI launcher directly,
+# so uid_entrypoint never runs on the launcher. The wrapper is linked at
+# /usr/local/bin/mpirun and /usr/local/bin/mpiexec, which PATH lists before
+# /usr/lib64/openmpi/bin.
+RUN dnf install -y --setopt=install_weak_deps=False openssh-server && dnf clean all \
+ && mkdir -p /var/run/sshd /home/mpiuser/.openmpi \
+ && test -x /usr/lib64/openmpi/bin/mpirun \
+    || { echo "ERROR: base image has no OpenMPI at /usr/lib64/openmpi"; exit 1; }
+
+COPY mpiuser-sshd.conf /home/mpiuser/.sshd_config
+
+# The wrapper handles arbitrary OpenShift UIDs before launching MPI. Keep the
+# MPI helper names available in standard locations for OpenMPI's remote sshd.
+COPY --chmod=0755 openshift-uid-exec.sh /usr/local/bin/openshift-uid-exec.sh
+RUN ln -sfn openshift-uid-exec.sh /usr/local/bin/mpirun \
+ && ln -sfn openshift-uid-exec.sh /usr/local/bin/mpiexec \
+ && ln -sfn openshift-uid-exec.sh /usr/local/bin/uid_entrypoint.sh \
+ && ln -sfn /usr/lib64/openmpi/bin/orted /usr/bin/orted \
+ && ln -sfn /usr/lib64/openmpi/bin/mpiexec /usr/bin/mpiexec \
+ && if [ ! -e /usr/local/bin/python ]; then \
+      printf '#!/bin/sh\nexec /opt/app-root/bin/python "$@"\n' > /usr/local/bin/python \
+      && chmod 0755 /usr/local/bin/python; \
+    fi \
+ && grep -qxF 'LD_LIBRARY_PATH=/usr/lib64/openmpi/lib' /etc/environment \
+    || echo 'LD_LIBRARY_PATH=/usr/lib64/openmpi/lib' >> /etc/environment \
+ && chgrp -R 0 /home/mpiuser && chmod -R g=u /home/mpiuser \
+ && chmod g=u /etc/passwd
+
+ENV MPI_HOME=/usr/lib64/openmpi \
+    PATH=/usr/local/bin:/usr/lib64/openmpi/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/lib64/openmpi/lib:${LD_LIBRARY_PATH}
+
+# Copy license file
+COPY LICENSE.md /licenses/cpu-license.md
+
+# Copy dual-mode entrypoint + lean workbench starter (no Elyra/Kale)
+COPY --chmod=0755 entrypoint-universal.sh /usr/local/bin/entrypoint-universal.sh
+COPY --chmod=0755 start-notebook.sh /usr/local/bin/start-notebook.sh
+
+# Fix permissions for OpenShift (final stage)
+RUN fix-permissions /opt/app-root -P \
+ && chmod -R g+w /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
+
+USER 1001
+WORKDIR /opt/app-root/src
+
+ENTRYPOINT ["/usr/local/bin/entrypoint-universal.sh"]
+CMD ["start-notebook.sh"]

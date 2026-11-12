@@ -13,13 +13,9 @@
 ################################################################################
 # Build Arguments
 ################################################################################
-# POC (workbench required): base on odh-base instead of jupyter-minimal, then
-# layer a lean JupyterLab stack in-repo (no Elyra / Kale).
-ARG BASE_IMAGE=quay.io/opendatahub/odh-base-image-cuda-py312-c9s:v13.0@sha256:73528ebb7edbe39cda242bf71d7e2dc23f40a29c0dbcf9390aab0a2dc449b20e
+ARG BASE_IMAGE=quay.io/opendatahub/odh-workbench-jupyter-minimal-cuda-py312-ubi9:3.6-v1.50
 ARG PYTHON_VERSION=3.12
 ARG DOWNSTREAM=false
-# Lean workbench packages (not locked in requirements.txt yet — see POC doc).
-ARG LEAN_WORKBENCH_PACKAGES="jupyterlab jupyter-server ipykernel"
 ARG OPENMPI_VERSION=4.1.6
 ARG UCX_VERSION=1.19.1
 ARG UCX_SHA256=0fe68f2592b7b378bdac7ccb78331e9e8c5be250f40be118edb1795e94c60209
@@ -45,14 +41,6 @@ RUN UV_LINK_MODE=copy uv pip install --no-cache-dir --no-deps \
     --index-strategy=unsafe-best-match \
     --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/cuda13.0-ubi9/simple/ \
     -r /tmp/deps/requirements.txt
-
-# POC: lean JupyterLab (no Elyra/Kale). Follow-up: pin in pyproject.toml + lock.
-ARG LEAN_WORKBENCH_PACKAGES
-RUN UV_LINK_MODE=copy uv pip install --no-cache-dir \
-    --index-strategy=unsafe-best-match \
-    --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/cuda13.0-ubi9/simple/ \
-    ${LEAN_WORKBENCH_PACKAGES} \
- && python -m ipykernel install --prefix=/opt/app-root --name=python3 --display-name="Python 3"
 
 # Fix permissions for OpenShift
 ARG PYTHON_VERSION
@@ -151,10 +139,10 @@ RUN if [ "${DOWNSTREAM}" != "true" ]; then \
 FROM ${BASE_IMAGE} AS final
 
 LABEL name="th-torch-cuda-py312" \
-      summary="CUDA 13.0.2 Python 3.12 Training Hub + lean JupyterLab on EL9" \
-      description="Universal CUDA training image: lean JupyterLab workbench (no Elyra/Kale) + runtime ML stack on odh-base" \
+      summary="CUDA 13.0.2 Python 3.12 Training Hub 11 PyTorch 2.13.0 image on UBI9" \
+      description="Universal CUDA training image combining Jupyter workbench and runtime ML stack on UBI9" \
       io.k8s.display-name="CUDA Python 3.12 Universal Training Image" \
-      io.k8s.description="Universal CUDA training image: lean Jupyter workbench by default; runtime when command provided."
+      io.k8s.description="Universal CUDA training image: Jupyter workbench by default; runtime when command provided."
 
 USER 0
 WORKDIR /opt/app-root/src
@@ -218,7 +206,6 @@ fi
 ARG PYTHON_VERSION
 COPY --from=builder /opt/app-root/lib/python${PYTHON_VERSION}/site-packages /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=builder /opt/app-root/bin /opt/app-root/bin
-COPY --from=builder /opt/app-root/share/jupyter /opt/app-root/share/jupyter
 RUN if [ "${DOWNSTREAM}" != "true" ]; then \
     dnf remove -y --noautoremove --disablerepo='mlnx_ofed*' openmpi openmpi-devel \
     && rm -rf /usr/lib64/openmpi \
@@ -307,9 +294,8 @@ RUN if [ "${DOWNSTREAM}" != "true" ]; then \
 # Copy license file
 COPY LICENSE.md /licenses/cuda-license.md
 
-# Copy dual-mode entrypoint + lean workbench starter (no Elyra/Kale)
+# Copy entrypoint
 COPY --chmod=0755 entrypoint-universal.sh /usr/local/bin/entrypoint-universal.sh
-COPY --chmod=0755 start-notebook.sh /usr/local/bin/start-notebook.sh
 
 # Fix permissions for OpenShift (final stage)
 RUN fix-permissions /opt/app-root -P \

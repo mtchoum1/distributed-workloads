@@ -1,0 +1,10 @@
+# Derived from notebooks jupyter/minimal/ubi9-python-3.12 requirements.cpu.txt
+# at the 3.7 handoff. This is intentionally a small real PoC contract, not a
+# production lock: resolve transitive dependencies from the explicit AIPCC
+# index. Replace this file with the complete, hash-locked 3.7-GA export.
+--index-url https://packages.redhat.com/api/pypi/public-rhai/cpu-torch2.13-el9.8/simple/
+ipykernel==7.4.0
+jupyter-server==2.21.1
+jupyterlab==4.5.11
+jupyterlab-git==0.55.0
+pandoc-rhai==3.9.0.2+rhaiv.1

@@ -1,5 +1,4 @@
-# POC: align helper default with odh-base (not jupyter-minimal). Override for RHOAI/AIPCC.
-ARG BASE_IMAGE=quay.io/opendatahub/odh-base-image-cuda-py312-c9s:v13.0@sha256:73528ebb7edbe39cda242bf71d7e2dc23f40a29c0dbcf9390aab0a2dc449b20e
+ARG BASE_IMAGE=quay.io/rhoai/odh-workbench-jupyter-minimal-cuda-py312-rhel9@sha256:e075cd95379850122ba7efa9be1b385c680fda1751f43d45b87de657b5166e48
 
 FROM ${BASE_IMAGE}
 

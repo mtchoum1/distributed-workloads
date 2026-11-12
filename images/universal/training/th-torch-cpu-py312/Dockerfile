@@ -12,13 +12,9 @@
 ################################################################################
 # Build Arguments
 ################################################################################
-# POC (workbench required): base on odh-base instead of jupyter-minimal, then
-# layer a lean JupyterLab stack in-repo (no Elyra / Kale).
-ARG BASE_IMAGE=quay.io/opendatahub/odh-base-image-cpu-py312-c9s:latest@sha256:838744ad87615f76bd5aae375d973e58a11fd86342328c755f47ce0bd1e4697f
+ARG BASE_IMAGE=quay.io/opendatahub/odh-workbench-jupyter-minimal-cpu-py312-ubi9:3.6-v1.50
 ARG PYTHON_VERSION=3.12
 ARG DOWNSTREAM=false
-# Lean workbench packages (not locked in requirements.txt yet — see POC doc).
-ARG LEAN_WORKBENCH_PACKAGES="jupyterlab jupyter-server ipykernel"
 
 ################################################################################
 # Build Stage - Install Python Dependencies
@@ -40,13 +36,6 @@ RUN pip install --no-cache-dir --no-deps \
     --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/cpu-ubi9/simple/\
     -r /tmp/deps/requirements.txt
 
-# POC: lean JupyterLab (no Elyra/Kale). Follow-up: pin in pyproject.toml + lock.
-ARG LEAN_WORKBENCH_PACKAGES
-RUN pip install --no-cache-dir \
-    --index-url=https://console.redhat.com/api/pypi/public-rhai/rhoai/3.6/cpu-ubi9/simple/ \
-    ${LEAN_WORKBENCH_PACKAGES} \
- && python -m ipykernel install --prefix=/opt/app-root --name=python3 --display-name="Python 3"
-
 # Fix permissions for OpenShift
 ARG PYTHON_VERSION
 USER 0
@@ -62,10 +51,10 @@ RUN rm -rf /tmp/deps
 FROM ${BASE_IMAGE} AS final
 
 LABEL name="th-torch-cpu-py312" \
-      summary="CPU Python 3.12 Training Hub + lean JupyterLab on EL9" \
-      description="Universal CPU training image: lean JupyterLab workbench (no Elyra/Kale) + runtime ML stack on odh-base" \
+      summary="CPU Python 3.12 Training Hub 11 PyTorch 2.13.0 image on UBI9" \
+      description="Universal CPU training image combining Jupyter workbench and runtime ML stack on UBI9" \
       io.k8s.display-name="CPU Python 3.12 Universal Training Image" \
-      io.k8s.description="Universal CPU training image: lean Jupyter workbench by default; runtime when command provided."
+      io.k8s.description="Universal CPU training image: Jupyter workbench by default; runtime when command provided."
 
 USER 0
 WORKDIR /opt/app-root/src
@@ -93,12 +82,11 @@ fi
 # END MIDSTREAM ONLY
 ################################################################################
 
-# Copy Python site-packages, CLI entry points, and Jupyter kernelspec from builder
+# Copy Python site-packages and CLI entry points from builder stage
 # This excludes any build artifacts (FIPS friendly)
 ARG PYTHON_VERSION
 COPY --from=builder /opt/app-root/lib/python${PYTHON_VERSION}/site-packages /opt/app-root/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=builder /opt/app-root/bin /opt/app-root/bin
-COPY --from=builder /opt/app-root/share/jupyter /opt/app-root/share/jupyter
 
 # polyfile-weave registers cv2.typing stubs that trigger import cv2 during
 # pkgutil scanning in multiprocessing.spawn, which fails on UBI9
@@ -139,9 +127,8 @@ ENV MPI_HOME=/usr/lib64/openmpi \
 # Copy license file
 COPY LICENSE.md /licenses/cpu-license.md
 
-# Copy dual-mode entrypoint + lean workbench starter (no Elyra/Kale)
+# Copy entrypoint
 COPY --chmod=0755 entrypoint-universal.sh /usr/local/bin/entrypoint-universal.sh
-COPY --chmod=0755 start-notebook.sh /usr/local/bin/start-notebook.sh
 
 # Fix permissions for OpenShift (final stage)
 RUN fix-permissions /opt/app-root -P \

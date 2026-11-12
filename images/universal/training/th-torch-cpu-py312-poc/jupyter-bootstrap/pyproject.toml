@@ -1,0 +1,16 @@
+# Provenance-only input for the vendored CPU bootstrap.
+#
+# Export the full resolved requirements and pylock from the Notebooks 3.7 GA
+# maintenance tag before promoting this PoC. Dockerfile.poc installs the small
+# real requirements.cpu.txt below to keep the local PoC reviewable.
+[project]
+name = "training-universal-jupyter-bootstrap-poc"
+version = "0.0.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "ipykernel==7.4.0",
+  "jupyter-server==2.21.1",
+  "jupyterlab==4.5.11",
+  "jupyterlab-git==0.55.0",
+  "pandoc-rhai==3.9.0.2+rhaiv.1",
+]
